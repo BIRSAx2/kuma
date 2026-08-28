@@ -1,0 +1,28 @@
+# Rust
+target/
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# Coverage
+/coverage/
+/tarpaulin-report.html
+/lcov.info
+
+# Local environment
+.env
+.env.*
+!.env.example
+*.log
+
+# Editors
+/.idea/
+/.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db

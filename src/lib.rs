@@ -1,0 +1,23 @@
+//! Kuma compiler backend.
+
+pub mod alias;
+pub mod amd64;
+pub mod arm64;
+pub mod cfg;
+pub mod compile;
+pub mod copy;
+pub mod emit;
+pub mod fold;
+pub mod ir;
+pub mod live;
+pub mod load;
+pub mod mem;
+pub mod parse;
+pub mod regalloc;
+pub mod simpl;
+pub mod spill;
+pub mod ssa;
+pub mod util;
+
+pub use compile::compile;
+pub use ir::Target;

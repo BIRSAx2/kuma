@@ -1,0 +1,10 @@
+[package]
+name = "kuma"
+version = "0.0.1"
+edition = "2024"
+description = "Kuma: a lightweight compiler backend based on QBE"
+license = "MIT"
+documentation = "https://docs.rs/kuma"
+homepage = "https://github.com/BIRSAx2/kuma"
+repository = "https://github.com/BIRSAx2/kuma"
+readme = "README.md"
