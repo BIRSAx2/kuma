@@ -1,581 +1,726 @@
-//! Tests for the public IR types and helpers.
+//! Tests for Kuma's read-only semantic IR and typed facade.
 
-use kuma::ir::*;
+use kuma::ir::{Constant, DataItem, Terminator, TypeMember, Value, ValueClass};
+use kuma::{CompileError, Target, compile, compile_module, parse};
 
-#[test]
-fn ref_r_is_default() {
-    assert_eq!(Ref::default(), Ref::R);
+const SIMPLE: &str = r#"
+export function w $add(w %left, w %right) {
+@start
+    %sum =w add %left, %right
+    ret %sum
+}
+"#;
+
+const BRANCH: &str = r#"
+function w $choose(w %condition) {
+@start
+    jnz %condition, @yes, @no
+@yes
+    ret 1
+@no
+    ret 0
+}
+"#;
+
+const PHI: &str = r#"
+function w $select(w %condition) {
+@start
+    jnz %condition, @left, @right
+@left
+    jmp @join
+@right
+    jmp @join
+@join
+    %result =w phi @left 1, @right 2
+    ret %result
+}
+"#;
+
+fn simple_module() -> kuma::ir::Module {
+    parse(SIMPLE).expect("simple module should parse")
 }
 
 #[test]
-fn ref_r_is_none() {
-    assert!(Ref::R.is_none());
-    assert!(!Ref::R.is_tmp());
+fn empty_module_has_no_declarations() {
+    let module = parse("").expect("empty module");
+    assert_eq!(module.functions().count(), 0);
+    assert_eq!(module.type_definitions().count(), 0);
+    assert_eq!(module.data_definitions().count(), 0);
 }
 
 #[test]
-fn ref_tmp_creation() {
-    let r = Ref::Tmp(TmpId(5));
-    assert!(r.is_tmp());
-    assert!(!r.is_none());
-    assert_eq!(r.val(), 5);
+fn function_name_is_readable() {
+    let module = simple_module();
+    assert_eq!(module.functions().next().expect("function").name(), "add");
 }
 
 #[test]
-fn ref_con_creation() {
-    let r = Ref::Con(ConId(3));
-    assert!(!r.is_tmp());
-    assert!(!r.is_none());
-    assert_eq!(r.val(), 3);
+fn function_id_is_source_ordered() {
+    let module = simple_module();
+    assert_eq!(module.functions().next().expect("function").id().index(), 0);
 }
 
 #[test]
-fn ref_int_creation() {
-    let r = Ref::Int(42);
-    assert!(!r.is_tmp());
-    assert!(!r.is_none());
-    assert_eq!(r.sval(), 42);
+fn function_id_is_printable() {
+    let module = simple_module();
+    assert_eq!(
+        module
+            .functions()
+            .next()
+            .expect("function")
+            .id()
+            .to_string(),
+        "0"
+    );
 }
 
 #[test]
-fn ref_int_negative() {
-    let r = Ref::Int(-1);
-    let v = r.val();
-    assert_eq!(v, 0x1FFF_FFFF);
-    let sv = r.sval();
-    assert_eq!(sv, -1);
+fn function_lookup_accepts_owned_id() {
+    let module = simple_module();
+    let id = module.functions().next().expect("function").id();
+    assert_eq!(module.function(id).expect("lookup").name(), "add");
 }
 
 #[test]
-fn ref_slot_creation() {
-    let r = Ref::Slot(7);
-    assert!(!r.is_tmp());
-    assert!(!r.is_none());
-    assert_eq!(r.val(), 7);
+fn exported_linkage_is_visible() {
+    let module = simple_module();
+    assert!(
+        module
+            .functions()
+            .next()
+            .expect("function")
+            .linkage()
+            .is_exported()
+    );
 }
 
 #[test]
-fn ref_equality() {
-    assert_eq!(Ref::Tmp(TmpId(1)), Ref::Tmp(TmpId(1)));
-    assert_ne!(Ref::Tmp(TmpId(1)), Ref::Tmp(TmpId(2)));
-    assert_ne!(Ref::Tmp(TmpId(1)), Ref::Con(ConId(1)));
-    assert_ne!(Ref::R, Ref::Int(0));
+fn ordinary_linkage_is_not_exported() {
+    let module = parse(BRANCH).expect("branch module");
+    assert!(
+        !module
+            .functions()
+            .next()
+            .expect("function")
+            .linkage()
+            .is_exported()
+    );
 }
 
 #[test]
-fn ref_special_constants() {
-    assert_eq!(Ref::UNDEF, Ref::Con(ConId(0)));
-    assert_eq!(Ref::CON_Z, Ref::Con(ConId(1)));
-    assert_ne!(Ref::UNDEF, Ref::CON_Z);
+fn variadic_function_is_visible() {
+    let module = parse("function $f(w %x, ...) {\n@start\n ret\n}\n").expect("variadic");
+    assert!(module.functions().next().expect("function").is_variadic());
 }
 
 #[test]
-fn ref_rtype_values() {
-    assert_eq!(Ref::R.rtype(), -1);
-    assert_eq!(Ref::Tmp(TmpId(0)).rtype(), 0);
-    assert_eq!(Ref::Con(ConId(0)).rtype(), 1);
-    assert_eq!(Ref::Int(0).rtype(), 2);
+fn ordinary_function_is_not_variadic() {
+    assert!(
+        !simple_module()
+            .functions()
+            .next()
+            .expect("function")
+            .is_variadic()
+    );
 }
 
 #[test]
-fn bset_new_empty() {
-    let bs = BSet::new(64);
-    assert_eq!(bs.count(), 0);
-    for i in 0..64 {
-        assert!(!bs.has(i));
+fn basic_blocks_preserve_source_order() {
+    let module = parse(BRANCH).expect("branch module");
+    let names: Vec<_> = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .map(|block| block.name())
+        .collect();
+    assert_eq!(names, ["start", "yes", "no"]);
+}
+
+#[test]
+fn basic_block_ids_are_source_ordered() {
+    let module = parse(BRANCH).expect("branch module");
+    let ids: Vec<_> = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .map(|block| block.id().index())
+        .collect();
+    assert_eq!(ids, [0, 1, 2]);
+}
+
+#[test]
+fn basic_block_lookup_uses_typed_id() {
+    let module = parse(BRANCH).expect("branch module");
+    let function = module.functions().next().expect("function");
+    let id = function.basic_blocks().nth(1).expect("block").id();
+    assert_eq!(function.basic_block(id).expect("lookup").name(), "yes");
+}
+
+#[test]
+fn instruction_mnemonic_is_readable() {
+    let module = simple_module();
+    let add = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .next()
+        .expect("block")
+        .instructions()
+        .find(|instruction| instruction.mnemonic() == "add")
+        .expect("add instruction");
+    assert_eq!(add.mnemonic(), "add");
+}
+
+#[test]
+fn instruction_class_is_typed() {
+    let module = simple_module();
+    let add = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .next()
+        .expect("block")
+        .instructions()
+        .find(|instruction| instruction.mnemonic() == "add")
+        .expect("add instruction");
+    assert_eq!(add.value_class(), Some(ValueClass::Word));
+}
+
+#[test]
+fn instruction_result_uses_typed_id() {
+    let module = simple_module();
+    let result = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .next()
+        .expect("block")
+        .instructions()
+        .find(|instruction| instruction.mnemonic() == "add")
+        .expect("add instruction")
+        .result()
+        .expect("result");
+    assert!(result.index() > 0);
+}
+
+#[test]
+fn instruction_operands_are_values() {
+    let module = simple_module();
+    let operand_count = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .next()
+        .expect("block")
+        .instructions()
+        .find(|instruction| instruction.mnemonic() == "add")
+        .expect("add instruction")
+        .operands()
+        .count();
+    assert_eq!(operand_count, 2);
+}
+
+#[test]
+fn return_terminator_carries_value() {
+    let module = simple_module();
+    let terminator = module
+        .functions()
+        .next()
+        .expect("function")
+        .basic_blocks()
+        .next()
+        .expect("block")
+        .terminator();
+    assert!(matches!(
+        terminator,
+        Terminator::Return(Some(Value::Temporary(_)))
+    ));
+}
+
+#[test]
+fn void_return_has_no_value() {
+    let module = parse("function $f() {\n@start\n ret\n}\n").expect("void function");
+    let terminator = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .next()
+        .unwrap()
+        .terminator();
+    assert_eq!(terminator, &Terminator::Return(None));
+}
+
+#[test]
+fn jump_terminator_carries_one_target() {
+    let module = parse(PHI).expect("phi module");
+    let function = module.functions().next().expect("function");
+    let left = function
+        .basic_blocks()
+        .find(|block| block.name() == "left")
+        .unwrap();
+    assert!(matches!(left.terminator(), Terminator::Jump(_)));
+}
+
+#[test]
+fn branch_terminator_carries_condition_and_targets() {
+    let module = parse(BRANCH).expect("branch module");
+    let block = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .next()
+        .unwrap();
+    assert!(matches!(block.terminator(), Terminator::Branch { .. }));
+}
+
+#[test]
+fn halt_terminator_is_typed() {
+    let module = parse("function $f() {\n@start\n hlt\n}\n").expect("halt function");
+    let block = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .next()
+        .unwrap();
+    assert_eq!(block.terminator(), &Terminator::Halt);
+}
+
+#[test]
+fn phi_nodes_are_exposed() {
+    let module = parse(PHI).expect("phi module");
+    let join = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .find(|b| b.name() == "join")
+        .unwrap();
+    assert_eq!(join.phis().count(), 1);
+}
+
+#[test]
+fn phi_result_is_typed() {
+    let module = parse(PHI).expect("phi module");
+    let join = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .find(|b| b.name() == "join")
+        .unwrap();
+    assert!(join.phis().next().unwrap().result().index() > 0);
+}
+
+#[test]
+fn phi_class_is_typed() {
+    let module = parse(PHI).expect("phi module");
+    let join = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .find(|b| b.name() == "join")
+        .unwrap();
+    assert_eq!(join.phis().next().unwrap().value_class(), ValueClass::Word);
+}
+
+#[test]
+fn phi_inputs_are_paired() {
+    let module = parse(PHI).expect("phi module");
+    let join = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .find(|b| b.name() == "join")
+        .unwrap();
+    assert_eq!(join.phis().next().unwrap().inputs().count(), 2);
+}
+
+#[test]
+fn phi_input_has_predecessor_and_value() {
+    let module = parse(PHI).expect("phi module");
+    let join = module
+        .functions()
+        .next()
+        .unwrap()
+        .basic_blocks()
+        .find(|b| b.name() == "join")
+        .unwrap();
+    let input = join.phis().next().unwrap().inputs().next().unwrap();
+    assert!(input.predecessor().index() > 0);
+    assert!(matches!(
+        input.value(),
+        Value::Constant(Constant::Integer(1))
+    ));
+}
+
+const TYPES: &str = r#"
+type :pair = align 16 { w, l }
+type :choice = { { w } { l } }
+type :opaque = align 8 { 0 }
+"#;
+
+#[test]
+fn type_names_preserve_source_order() {
+    let module = parse(TYPES).expect("types");
+    let names: Vec<_> = module.type_definitions().map(|ty| ty.name()).collect();
+    assert_eq!(names, ["pair", "choice", "opaque"]);
+}
+
+#[test]
+fn type_id_is_source_ordered() {
+    let module = parse(TYPES).expect("types");
+    assert_eq!(module.type_definitions().nth(1).unwrap().id().index(), 1);
+}
+
+#[test]
+fn type_lookup_uses_typed_id() {
+    let module = parse(TYPES).expect("types");
+    let id = module.type_definitions().nth(1).unwrap().id();
+    assert_eq!(module.type_definition(id).unwrap().name(), "choice");
+}
+
+#[test]
+fn type_alignment_is_in_bytes() {
+    let module = parse(TYPES).expect("types");
+    assert_eq!(
+        module.type_definitions().next().unwrap().alignment(),
+        Some(16)
+    );
+}
+
+#[test]
+fn type_size_is_available() {
+    let module = parse(TYPES).expect("types");
+    assert!(module.type_definitions().next().unwrap().size() >= 16);
+}
+
+#[test]
+fn struct_has_one_variant() {
+    let module = parse(TYPES).expect("types");
+    assert_eq!(
+        module.type_definitions().next().unwrap().variants().count(),
+        1
+    );
+}
+
+#[test]
+fn struct_members_are_typed() {
+    let module = parse(TYPES).expect("types");
+    let ty = module.type_definitions().next().unwrap();
+    let members: Vec<_> = ty.variants().next().unwrap().members().collect();
+    assert!(matches!(members[0], TypeMember::Word(1)));
+    assert!(matches!(members[1], TypeMember::Padding(4)));
+    assert!(matches!(members[2], TypeMember::Long(1)));
+}
+
+#[test]
+fn repeated_type_members_are_grouped() {
+    let module = parse("type :bytes = { b 4 }\n").expect("array type");
+    let member = module
+        .type_definitions()
+        .next()
+        .unwrap()
+        .variants()
+        .next()
+        .unwrap()
+        .members()
+        .next()
+        .unwrap();
+    assert!(matches!(member, TypeMember::Byte(4)));
+}
+
+#[test]
+fn union_is_identified() {
+    let module = parse(TYPES).expect("types");
+    assert!(module.type_definitions().nth(1).unwrap().is_union());
+}
+
+#[test]
+fn opaque_type_is_identified() {
+    let module = parse(TYPES).expect("types");
+    assert!(module.type_definitions().nth(2).unwrap().is_opaque());
+}
+
+const DATA: &str = r#"
+export data $items = { b 1, h 2, w 3, l 4, z 5, b "x", l $symbol+8, s s_1.5, d d_2.5 }
+"#;
+
+fn data_items() -> Vec<DataItem> {
+    parse(DATA)
+        .expect("data")
+        .data_definitions()
+        .next()
+        .expect("definition")
+        .items()
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn data_name_is_readable() {
+    let module = parse(DATA).expect("data");
+    assert_eq!(module.data_definitions().next().unwrap().name(), "items");
+}
+
+#[test]
+fn data_linkage_is_readable() {
+    let module = parse(DATA).expect("data");
+    assert!(
+        module
+            .data_definitions()
+            .next()
+            .unwrap()
+            .linkage()
+            .is_exported()
+    );
+}
+
+#[test]
+fn byte_data_is_typed() {
+    assert!(data_items().iter().any(|item| item == &DataItem::Byte(1)));
+}
+
+#[test]
+fn half_data_is_typed() {
+    assert!(data_items().iter().any(|item| item == &DataItem::Half(2)));
+}
+
+#[test]
+fn word_data_is_typed() {
+    assert!(data_items().iter().any(|item| item == &DataItem::Word(3)));
+}
+
+#[test]
+fn long_data_is_typed() {
+    assert!(data_items().iter().any(|item| item == &DataItem::Long(4)));
+}
+
+#[test]
+fn zero_data_is_typed() {
+    assert!(data_items().iter().any(|item| item == &DataItem::Zero(5)));
+}
+
+#[test]
+fn string_data_is_typed() {
+    assert!(
+        data_items()
+            .iter()
+            .any(|item| item == &DataItem::String("x".into()))
+    );
+}
+
+#[test]
+fn symbol_data_is_typed() {
+    assert!(
+        data_items()
+            .iter()
+            .any(|item| matches!(item, DataItem::Symbol { name, offset: 8 } if name == "symbol"))
+    );
+}
+
+#[test]
+fn single_data_is_typed() {
+    assert!(
+        data_items()
+            .iter()
+            .any(|item| item == &DataItem::Single(1.5))
+    );
+}
+
+#[test]
+fn double_data_is_typed() {
+    assert!(
+        data_items()
+            .iter()
+            .any(|item| item == &DataItem::Double(2.5))
+    );
+}
+
+#[test]
+fn parse_error_has_message() {
+    let error = parse("function").expect_err("invalid source");
+    assert!(!error.diagnostic().message().is_empty());
+}
+
+#[test]
+fn parse_error_has_one_based_line() {
+    let error = parse("\nfunction").expect_err("invalid source");
+    assert_eq!(error.diagnostic().line(), 2);
+}
+
+#[test]
+fn parse_error_has_one_based_column() {
+    let error = parse("function").expect_err("invalid source");
+    assert!(error.diagnostic().column() >= 1);
+}
+
+#[test]
+fn parse_error_has_byte_span() {
+    let error = parse("function").expect_err("invalid source");
+    assert!(error.diagnostic().span().start() <= "function".len());
+}
+
+#[test]
+fn parse_error_display_is_contextual() {
+    let error = parse("function").expect_err("invalid source");
+    assert!(error.to_string().contains("parse error"));
+}
+
+#[test]
+fn compile_propagates_parse_error() {
+    assert!(matches!(
+        compile("function", Target::Amd64SysV),
+        Err(CompileError::Parse(_))
+    ));
+}
+
+#[test]
+fn malformed_source_never_unwinds() {
+    for source in [
+        "function",
+        "function w $missing_body()",
+        "data $unterminated = { b \"text",
+        "type :bad = { nonsense }",
+        "function $bad() {\n@start\n jnz 1, @only\n}\n",
+    ] {
+        let result = std::panic::catch_unwind(|| parse(source));
+        assert!(result.is_ok(), "parser unwound for {source:?}");
+        assert!(result.unwrap().is_err(), "parser accepted {source:?}");
     }
 }
 
 #[test]
-fn bset_set_and_has() {
-    let mut bs = BSet::new(128);
-    bs.set(0);
-    bs.set(63);
-    bs.set(64);
-    bs.set(127);
-
-    assert!(bs.has(0));
-    assert!(bs.has(63));
-    assert!(bs.has(64));
-    assert!(bs.has(127));
-    assert!(!bs.has(1));
-    assert!(!bs.has(62));
-    assert!(!bs.has(65));
+fn invalid_ssa_is_a_compile_error() {
+    let source = "function w $bad() {\n@start\n ret %undefined\n}\n";
+    assert!(matches!(
+        compile(source, Target::Amd64SysV),
+        Err(CompileError::InvalidIr(_))
+    ));
 }
 
 #[test]
-fn bset_clr() {
-    let mut bs = BSet::new(64);
-    bs.set(10);
-    assert!(bs.has(10));
-    bs.clr(10);
-    assert!(!bs.has(10));
-}
-
-#[test]
-fn bset_count() {
-    let mut bs = BSet::new(256);
-    assert_eq!(bs.count(), 0);
-    bs.set(0);
-    assert_eq!(bs.count(), 1);
-    bs.set(100);
-    assert_eq!(bs.count(), 2);
-    bs.set(255);
-    assert_eq!(bs.count(), 3);
-    bs.set(0); // setting again shouldn't change count
-    assert_eq!(bs.count(), 3);
-}
-
-#[test]
-fn bset_zero() {
-    let mut bs = BSet::new(64);
-    bs.set(0);
-    bs.set(31);
-    bs.set(63);
-    assert_eq!(bs.count(), 3);
-    bs.zero();
-    assert_eq!(bs.count(), 0);
-    assert!(!bs.has(0));
-    assert!(!bs.has(31));
-    assert!(!bs.has(63));
-}
-
-#[test]
-fn bset_union() {
-    let mut a = BSet::new(64);
-    let mut b = BSet::new(64);
-    a.set(0);
-    a.set(10);
-    b.set(10);
-    b.set(20);
-    a.union(&b);
-    assert!(a.has(0));
-    assert!(a.has(10));
-    assert!(a.has(20));
-    assert_eq!(a.count(), 3);
-}
-
-#[test]
-fn bset_inter() {
-    let mut a = BSet::new(64);
-    let mut b = BSet::new(64);
-    a.set(0);
-    a.set(10);
-    a.set(20);
-    b.set(10);
-    b.set(20);
-    b.set(30);
-    a.inter(&b);
-    assert!(!a.has(0));
-    assert!(a.has(10));
-    assert!(a.has(20));
-    assert!(!a.has(30));
-    assert_eq!(a.count(), 2);
-}
-
-#[test]
-fn bset_diff() {
-    let mut a = BSet::new(64);
-    let mut b = BSet::new(64);
-    a.set(0);
-    a.set(10);
-    a.set(20);
-    b.set(10);
-    b.set(30);
-    a.diff(&b);
-    assert!(a.has(0));
-    assert!(!a.has(10));
-    assert!(a.has(20));
-    assert_eq!(a.count(), 2);
-}
-
-#[test]
-fn bset_equal() {
-    let mut a = BSet::new(64);
-    let mut b = BSet::new(64);
-    assert!(a.equal(&b));
-
-    a.set(5);
-    assert!(!a.equal(&b));
-
-    b.set(5);
-    assert!(a.equal(&b));
-}
-
-#[test]
-fn bset_copy_from() {
-    let mut a = BSet::new(64);
-    let mut b = BSet::new(64);
-    b.set(3);
-    b.set(42);
-    a.copy_from(&b);
-    assert!(a.has(3));
-    assert!(a.has(42));
-    assert!(a.equal(&b));
-}
-
-#[test]
-fn bset_iter() {
-    let mut bs = BSet::new(128);
-    bs.set(5);
-    bs.set(63);
-    bs.set(64);
-    bs.set(100);
-
-    let bits: Vec<u32> = bs.iter().collect();
-    assert_eq!(bits, vec![5, 63, 64, 100]);
-}
-
-#[test]
-fn bset_iter_empty() {
-    let bs = BSet::new(64);
-    let bits: Vec<u32> = bs.iter().collect();
-    assert!(bits.is_empty());
-}
-
-#[test]
-fn op_is_store() {
-    assert!(Op::Storeb.is_store());
-    assert!(Op::Storeh.is_store());
-    assert!(Op::Storew.is_store());
-    assert!(Op::Storel.is_store());
-    assert!(Op::Stores.is_store());
-    assert!(Op::Stored.is_store());
-    assert!(!Op::Add.is_store());
-    assert!(!Op::Loadsb.is_store());
-}
-
-#[test]
-fn op_is_load() {
-    assert!(Op::Loadsb.is_load());
-    assert!(Op::Loadub.is_load());
-    assert!(Op::Loadsh.is_load());
-    assert!(Op::Loaduh.is_load());
-    assert!(Op::Loadsw.is_load());
-    assert!(Op::Loaduw.is_load());
-    assert!(Op::Load.is_load());
-    assert!(!Op::Add.is_load());
-    assert!(!Op::Storew.is_load());
-}
-
-#[test]
-fn op_is_ext() {
-    assert!(Op::Extsb.is_ext());
-    assert!(Op::Extub.is_ext());
-    assert!(Op::Extsh.is_ext());
-    assert!(Op::Extuh.is_ext());
-    assert!(Op::Extsw.is_ext());
-    assert!(Op::Extuw.is_ext());
-    assert!(!Op::Add.is_ext());
-}
-
-#[test]
-fn op_is_par() {
-    assert!(Op::Par.is_par());
-    assert!(Op::Parc.is_par());
-    assert!(Op::Pare.is_par());
-    assert!(!Op::Add.is_par());
-    assert!(!Op::Arg.is_par());
-}
-
-#[test]
-fn op_is_arg() {
-    assert!(Op::Arg.is_arg());
-    assert!(Op::Argc.is_arg());
-    assert!(Op::Arge.is_arg());
-    assert!(Op::Argv.is_arg());
-    assert!(!Op::Add.is_arg());
-    assert!(!Op::Par.is_arg());
-}
-
-#[test]
-fn op_is_parbh() {
-    assert!(Op::Parsb.is_parbh());
-    assert!(Op::Parub.is_parbh());
-    assert!(Op::Parsh.is_parbh());
-    assert!(Op::Paruh.is_parbh());
-    assert!(!Op::Par.is_parbh());
-    assert!(!Op::Add.is_parbh());
-}
-
-#[test]
-fn op_is_argbh() {
-    assert!(Op::Argsb.is_argbh());
-    assert!(Op::Argub.is_argbh());
-    assert!(Op::Argsh.is_argbh());
-    assert!(Op::Arguh.is_argbh());
-    assert!(!Op::Arg.is_argbh());
-    assert!(!Op::Add.is_argbh());
-}
-
-#[test]
-fn op_is_cmp() {
-    assert!(Op::Ceqw.is_cmp());
-    assert!(Op::Cslew.is_cmp());
-    assert!(Op::Ceqd.is_cmp());
-    assert!(!Op::Add.is_cmp());
-    assert!(!Op::Storew.is_cmp());
-}
-
-#[test]
-fn op_is_flag() {
-    assert!(Op::Flagieq.is_flag());
-    assert!(Op::Flagfuo.is_flag());
-    assert!(!Op::Add.is_flag());
-    assert!(!Op::Ceqw.is_flag());
-}
-
-#[test]
-fn op_is_alloc() {
-    assert!(Op::Alloc4.is_alloc());
-    assert!(Op::Alloc8.is_alloc());
-    assert!(Op::Alloc16.is_alloc());
-    assert!(!Op::Add.is_alloc());
-}
-
-#[test]
-fn op_can_fold() {
-    assert!(Op::Add.can_fold());
-    assert!(Op::Sub.can_fold());
-    assert!(Op::Mul.can_fold());
-    assert!(!Op::Storew.can_fold());
-}
-
-#[test]
-fn cls_is_wide() {
-    assert!(!Cls::Kw.is_wide());
-    assert!(Cls::Kl.is_wide());
-    assert!(!Cls::Ks.is_wide());
-    assert!(Cls::Kd.is_wide());
-    assert!(!Cls::Kx.is_wide());
-}
-
-#[test]
-fn cls_is_float() {
-    assert!(!Cls::Kw.is_float());
-    assert!(!Cls::Kl.is_float());
-    assert!(Cls::Ks.is_float());
-    assert!(Cls::Kd.is_float());
-    assert!(!Cls::Kx.is_float());
-}
-
-#[test]
-fn cls_base() {
-    assert_eq!(Cls::Kw.base(), 0);
-    assert_eq!(Cls::Kl.base(), 0);
-    assert_eq!(Cls::Ks.base(), 1);
-    assert_eq!(Cls::Kd.base(), 1);
-    assert_eq!(Cls::Kx.base(), -1);
-}
-
-#[test]
-fn cls_from_i8() {
-    assert_eq!(Cls::from_i8(0), Cls::Kw);
-    assert_eq!(Cls::from_i8(1), Cls::Kl);
-    assert_eq!(Cls::from_i8(2), Cls::Ks);
-    assert_eq!(Cls::from_i8(3), Cls::Kd);
-    assert_eq!(Cls::from_i8(-1), Cls::Kx);
-    assert_eq!(Cls::from_i8(99), Cls::Kx);
-}
-
-#[test]
-fn cls_as_index() {
-    assert_eq!(Cls::Kw.as_index(), 0);
-    assert_eq!(Cls::Kl.as_index(), 1);
-    assert_eq!(Cls::Ks.as_index(), 2);
-    assert_eq!(Cls::Kd.as_index(), 3);
-}
-
-#[test]
-#[should_panic]
-fn cls_kx_as_index_panics() {
-    let _ = Cls::Kx.as_index();
-}
-
-#[test]
-fn cls_default_is_kx() {
-    assert_eq!(Cls::default(), Cls::Kx);
-}
-
-#[test]
-fn jmp_is_ret() {
-    assert!(Jmp::Retw.is_ret());
-    assert!(Jmp::Retl.is_ret());
-    assert!(Jmp::Rets.is_ret());
-    assert!(Jmp::Retd.is_ret());
-    assert!(Jmp::Retc.is_ret());
-    assert!(Jmp::Ret0.is_ret());
-    assert!(!Jmp::Jmp_.is_ret());
-    assert!(!Jmp::Jnz.is_ret());
-}
-
-#[test]
-fn jmp_default() {
-    assert_eq!(Jmp::default(), Jmp::Jxxx);
-}
-
-#[test]
-fn ins_default() {
-    let ins = Ins::default();
-    assert_eq!(ins.to, Ref::R);
-    assert_eq!(ins.op, Op::Nop);
-}
-
-#[test]
-fn blk_id_basics() {
-    let id = BlkId(5);
-    assert_eq!(id.index(), 5);
-    assert!(!id.is_none());
-    assert!(BlkId::NONE.is_none());
-}
-
-#[test]
-fn tmp_id_basics() {
-    let id = TmpId(10);
-    assert_eq!(id.0, 10);
-}
-
-#[test]
-fn con_id_basics() {
-    let id = ConId(3);
-    assert_eq!(id.0, 3);
-}
-
-#[test]
-fn mem_id_basics() {
-    let id = MemId(7);
-    assert_eq!(id.0, 7);
-}
-
-#[test]
-fn con_bits_from_i64() {
-    let bits = ConBits::from_i64(42);
-    assert_eq!(bits.i(), 42);
-}
-
-#[test]
-fn con_bits_from_f64() {
-    let bits = ConBits::from_f64(3.75);
-    let val = bits.d();
-    assert!((val - 3.75).abs() < 1e-15);
-}
-
-#[test]
-fn con_bits_from_f32() {
-    let bits = ConBits::from_f32(2.5);
-    let val = bits.s();
-    assert!((val - 2.5).abs() < 1e-7);
-}
-
-#[test]
-fn con_bits_zero() {
-    let bits = ConBits::from_i64(0);
-    assert_eq!(bits.i(), 0);
-    assert_eq!(bits.d(), 0.0);
-}
-
-#[test]
-fn isreg_function() {
-    assert!(!isreg(Ref::R));
-    assert!(!isreg(Ref::Con(ConId(0))));
-    assert!(!isreg(Ref::Int(0)));
-    assert!(!isreg(Ref::Tmp(TmpId(0))));
-}
-
-#[test]
-fn phi_narg() {
-    let phi = Phi {
-        cls: Cls::Kw,
-        to: Ref::Tmp(TmpId(1)),
-        args: vec![Ref::Int(0), Ref::Tmp(TmpId(2))],
-        blks: vec![BlkId(0), BlkId(1)],
-    };
-    assert_eq!(phi.narg(), 2);
-}
-
-#[test]
-fn blk_default_fields() {
-    let blk = Blk::default();
-    assert!(blk.phi.is_empty());
-    assert!(blk.ins.is_empty());
-    assert_eq!(blk.s1, None);
-    assert_eq!(blk.s2, None);
-    assert!(blk.pred.is_empty());
-    assert!(blk.fron.is_empty());
-}
-
-#[test]
-fn cmpneg_involution() {
-    use kuma::ir::cmpneg;
-    let cmps = [
-        CmpI::Cieq,
-        CmpI::Cine,
-        CmpI::Cisle,
-        CmpI::Cisgt,
-        CmpI::Cislt,
-        CmpI::Cisge,
-        CmpI::Ciule,
-        CmpI::Ciugt,
-        CmpI::Ciult,
-        CmpI::Ciuge,
+fn validation_errors_never_unwind() {
+    let cases = [
+        (
+            "function $bad() {\n@start\n %p =l alloc4 -1\n ret\n}\n",
+            Target::Amd64SysV,
+        ),
+        (
+            "function $bad() {\n@start\n jmp @missing\n}\n",
+            Target::Amd64SysV,
+        ),
+        (
+            "type :wide = align 16 { l }\nfunction $bad(:wide %value) {\n@start\n ret\n}\n",
+            Target::Aarch64Elf,
+        ),
     ];
-    for &c in &cmps {
-        let n = cmpneg(c as u16);
-        let nn = cmpneg(n);
-        assert_eq!(nn, c as u16, "cmpneg is not an involution for {:?}", c);
+
+    for (source, target) in cases {
+        let result = std::panic::catch_unwind(|| compile(source, target));
+        assert!(result.is_ok(), "validation unwound for {source:?}");
+        assert!(matches!(result.unwrap(), Err(CompileError::InvalidIr(_))));
     }
 }
 
-#[test]
-fn cmpop_involution() {
-    use kuma::ir::cmpop;
-    let cmps = [
-        CmpI::Cieq,
-        CmpI::Cine,
-        CmpI::Cisle,
-        CmpI::Cisgt,
-        CmpI::Cislt,
-        CmpI::Cisge,
-        CmpI::Ciule,
-        CmpI::Ciugt,
-        CmpI::Ciult,
-        CmpI::Ciuge,
-    ];
-    for &c in &cmps {
-        let s = cmpop(c as u16);
-        let ss = cmpop(s);
-        assert_eq!(ss, c as u16, "cmpop is not an involution for {:?}", c);
-    }
-}
-
-#[test]
-fn argcls_for_add() {
-    let ins = Ins {
-        op: Op::Add,
-        cls: Cls::Kw,
-        to: Ref::Tmp(TmpId(1)),
-        arg: [Ref::Tmp(TmpId(2)), Ref::Tmp(TmpId(3))],
+macro_rules! target_compilation_test {
+    ($name:ident, $target:expr) => {
+        #[test]
+        fn $name() {
+            let assembly = compile(SIMPLE, $target).expect("compile target");
+            assert!(assembly.contains("add"));
+        }
     };
-    let cls_0 = argcls(&ins, 0);
-    assert_eq!(cls_0, Cls::Kw);
+}
+
+target_compilation_test!(compile_amd64_sysv, Target::Amd64SysV);
+target_compilation_test!(compile_amd64_apple, Target::Amd64Apple);
+target_compilation_test!(compile_aarch64_elf, Target::Aarch64Elf);
+target_compilation_test!(compile_aarch64_apple, Target::Aarch64Apple);
+
+#[test]
+fn repeated_compilation_is_deterministic() {
+    let first = compile(SIMPLE, Target::Amd64SysV).expect("first");
+    let second = compile(SIMPLE, Target::Amd64SysV).expect("second");
+    assert_eq!(first, second);
 }
 
 #[test]
-fn clsmerge_same() {
-    let mut c = Cls::Kw;
-    assert!(clsmerge(&mut c, Cls::Kw));
-    assert_eq!(c, Cls::Kw);
+fn interleaved_compilation_is_isolated() {
+    let first = compile(SIMPLE, Target::Amd64SysV).expect("first");
+    let _other = compile(SIMPLE, Target::Aarch64Elf).expect("other");
+    let second = compile(SIMPLE, Target::Amd64SysV).expect("second");
+    assert_eq!(first, second);
 }
 
 #[test]
-fn clsmerge_from_kx() {
-    let mut c = Cls::Kx;
-    assert!(clsmerge(&mut c, Cls::Kl));
-    assert_eq!(c, Cls::Kl);
+fn concurrent_compilation_is_isolated() {
+    let expected = compile(SIMPLE, Target::Amd64SysV).expect("expected");
+    let handles: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(|| compile(SIMPLE, Target::Amd64SysV).expect("thread")))
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().expect("thread panicked"), expected);
+    }
 }
 
 #[test]
-fn clsmerge_conflict() {
-    let mut c = Cls::Kw;
-    assert!(!clsmerge(&mut c, Cls::Kd));
+fn parsed_module_compiles_repeatedly() {
+    let module = simple_module();
+    let first = compile_module(&module, Target::Amd64SysV).expect("first");
+    let second = compile_module(&module, Target::Amd64SysV).expect("second");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn parsed_module_compiles_for_multiple_targets() {
+    let module = simple_module();
+    let amd64 = compile_module(&module, Target::Amd64SysV).expect("amd64");
+    let aarch64 = compile_module(&module, Target::Aarch64Elf).expect("aarch64");
+    assert_ne!(amd64, aarch64);
+}
+
+#[test]
+fn function_declarations_preserve_order() {
+    let module =
+        parse("function $a() {\n@x\n ret\n}\nfunction $b() {\n@y\n ret\n}\n").expect("functions");
+    assert_eq!(
+        module.functions().map(|f| f.name()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+}
+
+#[test]
+fn data_declarations_preserve_order() {
+    let module = parse("data $a = { w 1 }\ndata $b = { w 2 }\n").expect("data");
+    assert_eq!(
+        module
+            .data_definitions()
+            .map(|data| data.name())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+}
+
+#[test]
+fn thread_local_data_linkage_is_visible() {
+    let module = parse("thread data $value = { w 1 }\n").expect("TLS data");
+    assert!(
+        module
+            .data_definitions()
+            .next()
+            .unwrap()
+            .linkage()
+            .is_thread_local()
+    );
 }

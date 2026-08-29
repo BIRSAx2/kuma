@@ -8,3 +8,10 @@ documentation = "https://docs.rs/kuma"
 homepage = "https://github.com/BIRSAx2/kuma"
 repository = "https://github.com/BIRSAx2/kuma"
 readme = "README.md"
+
+[features]
+default = []
+ffi = []
+
+[lib]
+crate-type = ["rlib", "cdylib"]

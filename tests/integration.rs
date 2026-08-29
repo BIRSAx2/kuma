@@ -7,18 +7,18 @@ use std::process::Command;
 use kuma::Target;
 
 /// Return the target for the host platform.
-fn make_target() -> &'static Target {
+fn make_target() -> Target {
     if cfg!(target_os = "macos") {
         #[cfg(target_arch = "x86_64")]
         {
-            &kuma::amd64::T_AMD64_APPLE
+            Target::Amd64Apple
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            &kuma::arm64::T_ARM64_APPLE
+            Target::Aarch64Apple
         }
     } else {
-        &kuma::amd64::T_AMD64_SYSV
+        Target::Amd64SysV
     }
 }
 
@@ -100,7 +100,13 @@ fn run_ssa_test(test_name: &str) {
         && first_line.starts_with("# skip")
     {
         let targets: Vec<&str> = first_line.split_whitespace().skip(2).collect();
-        let current = make_target().name;
+        let current = match make_target() {
+            Target::Amd64SysV => "amd64_sysv",
+            Target::Amd64Apple => "amd64_apple",
+            Target::Aarch64Elf => "arm64",
+            Target::Aarch64Apple => "arm64_apple",
+            _ => unreachable!("unknown Kuma target"),
+        };
         if targets.iter().any(|&t| {
             t == current
                 || t == "amd64" && current.starts_with("amd64")
@@ -527,6 +533,6 @@ fn test_showcase_coro() {
         return;
     }
     let input = std::fs::read_to_string(path).unwrap();
-    let result = kuma::compile(&input, &kuma::arm64::T_ARM64_APPLE);
+    let result = kuma::compile(&input, Target::Aarch64Apple);
     assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
 }

@@ -1,5 +1,6 @@
 # Rust
 target/
+docs/
 **/*.rs.bk
 *.profraw
 *.profdata
